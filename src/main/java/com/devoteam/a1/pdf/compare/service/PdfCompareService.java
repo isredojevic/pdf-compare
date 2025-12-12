@@ -88,8 +88,7 @@ public class PdfCompareService {
         pool.shutdown();
     }
 
-    private CompareResult compareOne(Path oldFile,
-                                     Map<String, Path> newFilesByKey) {
+    private CompareResult compareOne(Path oldFile, Map<String, Path> newFilesByKey) {
         try {
             var keyOpt = businessKeyExtractor.extract(oldFile);
 
