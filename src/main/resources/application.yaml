@@ -1,0 +1,12 @@
+spring:
+  application:
+    name: pdf-compare-test
+  main:
+    web-application-type: none
+
+compare:
+  old-root: "D:/filesforcheck/oldfiles"
+  new-root: "D:/filesforcheck/newfiles"
+  report-dir: "D:/filesforcheck/report"
+  parallelism: 14
+
