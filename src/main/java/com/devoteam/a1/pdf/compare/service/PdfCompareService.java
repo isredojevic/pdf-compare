@@ -126,15 +126,6 @@ public class PdfCompareService {
             String oldText = textService.extractNormalized(oldFile);
             String newText = textService.extractNormalized(newFile);
 
-            if(oldText.contains("98600269148392")) {
-                log.info(oldText);
-                log.info("***********");
-                log.info(newText);
-                log.info("OLD hash: {}", DigestUtils.sha256Hex(oldText));
-                log.info("NEW hash: {}", DigestUtils.sha256Hex(newText));
-
-            }
-
             if (oldText.equals(newText)) {
                 return new CompareResult(
                         businessKey,
