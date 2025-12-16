@@ -14,9 +14,8 @@ import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.stream.Collectors;
 
 @Service
@@ -27,22 +26,39 @@ public class PdfCompareService {
     private final PdfHashService hashService;
     private final PdfTextService textService;
     private final CompareProperties props;
-    private final BusinessKeyExtractor businessKeyExtractor;
+    private final FilenameKeyExtractor filenameKeyExtractor;
+
+    private final LongAdder processed = new LongAdder();
+    private final LongAdder identical = new LongAdder();
+    private final LongAdder changed = new LongAdder();
+    private final LongAdder missing = new LongAdder();
+    private final LongAdder errors = new LongAdder();
 
     @PostConstruct
     public void logProps() {
-        System.out.println("Parallelism = " + props.parallelism());
+        log.info("Configured parallelism = {}", props.parallelism());
+        log.info("Resolved parallelism   = {}", props.resolvedParallelism());
+        log.info("Log period = {}", props.logPeriod());
     }
 
     public void run() throws Exception {
-        log.info("Started " + LocalDateTime.now());
+        log.info("Comparison started at {}", LocalDateTime.now());
 
-        ExecutorService pool = Executors.newFixedThreadPool(props.parallelism());
+        int threads = props.resolvedParallelism();
+
+        ExecutorService pool = new ThreadPoolExecutor(
+                threads,
+                threads,
+                0L,
+                TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(threads * 2),
+                new ThreadPoolExecutor.CallerRunsPolicy()
+        );
 
         Map<String, Path> newFilesByKey =
                 Files.walk(Path.of(props.newRoot()))
                         .filter(p -> p.toString().endsWith(".pdf"))
-                        .map(p -> businessKeyExtractor.extract(p)
+                        .map(p -> filenameKeyExtractor.extract(p)
                                 .map(k -> Map.entry(k, p))
                                 .orElse(null))
                         .filter(e -> e != null)
@@ -51,52 +67,43 @@ public class PdfCompareService {
                                 Map.Entry::getValue,
                                 (a, b) -> {
                                     throw new IllegalStateException(
-                                            "Duplicate business key in NEW files: " + a
+                                            "Duplicate filename key in NEW files: " + a
                                     );
                                 }
                         ));
 
         log.info("Indexed {} NEW pdf files", newFilesByKey.size());
 
-        List<Path> oldFiles = Files.walk(Path.of(props.oldRoot()))
-                .filter(p -> p.toString().endsWith(".pdf"))
-                .collect(Collectors.toList());
-
-        log.info("Found {} OLD pdf files", oldFiles.size());
-
         Files.createDirectories(Path.of(props.reportDir()));
 
         try (PrintWriter out = new PrintWriter(
-                Files.newBufferedWriter(Path.of(props.reportDir(), "comparison.csv")))) {
+                Files.newBufferedWriter(Path.of(props.reportDir(), "comparison.csv")));
+             var paths = Files.walk(Path.of(props.oldRoot()))) {
 
             out.println("business_key,status,reason");
 
-            List<Future<CompareResult>> futures = oldFiles.stream()
-                    .map(p -> pool.submit(() -> compareOne(p, newFilesByKey)))
-                    .toList();
-
-            for (Future<CompareResult> f : futures) {
-                CompareResult r = f.get();
-                out.printf("%s,%s,%s%n",
-                        r.relativePath(),
-                        r.status(),
-                        r.reason().replace(",", " "));
-            }
+            paths.filter(p -> p.toString().endsWith(".pdf"))
+                    .forEach(p -> submitAndWait(p, pool, newFilesByKey, out));
         }
 
-        log.info("Ended " + LocalDateTime.now());
         pool.shutdown();
+        pool.awaitTermination(1, TimeUnit.HOURS);
+
+        log.info("Comparison ended at {}", LocalDateTime.now());
     }
 
-    private CompareResult compareOne(Path oldFile, Map<String, Path> newFilesByKey) {
+    private CompareResult compareOne(Path oldFile,
+                                     Map<String, Path> newFilesByKey) {
+
+
         try {
-            var keyOpt = businessKeyExtractor.extract(oldFile);
+            var keyOpt = filenameKeyExtractor.extract(oldFile);
 
             if (keyOpt.isEmpty()) {
                 return new CompareResult(
                         oldFile.getFileName().toString(),
                         "SKIPPED",
-                        "Cannot extract business key"
+                        "Cannot extract filename key"
                 );
             }
 
@@ -135,6 +142,12 @@ public class PdfCompareService {
 
             String diff = TextDiffUtil.diffTokens(oldText, newText, 10);
 
+            // Help GC
+            oldText = null;
+            newText = null;
+            oldHash = null;
+            newHash = null;
+
             return new CompareResult(
                     businessKey,
                     "TEXT_CHANGED",
@@ -147,6 +160,48 @@ public class PdfCompareService {
                     "ERROR",
                     e.getMessage()
             );
+        }
+    }
+
+    private void submitAndWait(Path oldFile,
+                               ExecutorService pool,
+                               Map<String, Path> newFilesByKey,
+                               PrintWriter out) {
+
+        Future<CompareResult> f =
+                pool.submit(() -> compareOne(oldFile, newFilesByKey));
+
+        try {
+            CompareResult r = f.get();
+
+            processed.increment();
+
+            switch (r.status()) {
+                case "IDENTICAL_BINARY", "IDENTICAL_TEXT" -> identical.increment();
+                case "TEXT_CHANGED" -> changed.increment();
+                case "MISSING_NEW" -> missing.increment();
+                case "ERROR" -> errors.increment();
+            }
+
+            if (processed.sum() % props.logPeriod() == 0) {
+                log.info(
+                        "Processed={}, Identical={}, Changed={}, Missing={}, Errors={}",
+                        processed.sum(),
+                        identical.sum(),
+                        changed.sum(),
+                        missing.sum(),
+                        errors.sum()
+                );
+            }
+
+            synchronized (out) {
+                out.printf("%s,%s,%s%n",
+                        r.relativePath(),
+                        r.status(),
+                        r.reason().replace(",", " "));
+            }
+        } catch (Exception e) {
+            log.error("Failed processing {}", oldFile, e);
         }
     }
 

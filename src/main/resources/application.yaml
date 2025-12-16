@@ -9,4 +9,8 @@ compare:
   new-root: "D:/filesforcheck/newfiles"
   report-dir: "D:/filesforcheck/report"
   parallelism: 14
+  log-period: 1
+  filename-key:
+    mode: FROM_BEGINNING_TO_INDEX
+    end-index: 23
 
